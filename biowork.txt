@@ -1,0 +1,83 @@
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(R.utils)
+library(textshape)
+library(monocle)      
+library(ggplot2)
+library(SingleR)
+#读取文件
+dir="biowork/pri_filtered_feature_bc_matrix/"
+list.files(dir)
+counts <- Read10X(data.dir = dir)
+class(counts)
+##创建seurat对象
+seurat <- CreateSeuratObject(counts = counts, 
+                         project = "SeuratObject", 
+                         min.cells = 3,
+                         min.features = 200)
+seurat[["percent.mt"]] <- PercentageFeatureSet(seurat, pattern = "^MT-")#线粒体基因
+seurat[["percent.rb"]] <- PercentageFeatureSet(seurat, pattern = "^RP")#核糖体基
+
+#进行数据质控
+randomColor <- function() {
+  paste0("#",paste0(sample(c(0:9, letters[1:6]), 6, replace = TRUE),collapse = ""))
+}
+randomColors <- replicate(100,randomColor())
+VlnPlot(seurat, features = c("nCount_RNA","nFeature_RNA", "percent.mt","percent.rb"), ncol = 4)+scale_fill_manual(values =randomColors)
+
+
+#过滤异常值
+mask1 <- seurat$nCount_RNA >= 1000 & seurat$nCount_RNA<= 25000#细胞内检测到的分子总数
+mask2 <- seurat$nFeature_RNA >= 200 & seurat$nFeature_RNA <= 10000 #每个细胞中检测到的基因数量
+mask3 <- seurat$percent.mt <= 20#结合线粒体基因（percent.mt）去除异常值
+mask4 <- seurat$percent.rb<= 1#核糖体基因（percent.rb）除去异常值
+
+#对基因进行归一化
+seurat <- NormalizeData(seurat)
+seurat <- FindVariableFeatures(seurat,selection.method = 'vst')
+seurat <- ScaleData(seurat,features = rownames(seurat)) 
+# 降维聚类
+seurat <- RunPCA(seurat, features = VariableFeatures(object = seurat))#线性降维
+seurat <- RunTSNE(seurat,dims = 1:20)
+seurat <- RunUMAP(seurat,dims = 1:20)
+seurat <- FindNeighbors(seurat, dims = 1:20)# 计算k近邻并构建SNN图(寻找邻居)
+seurat <- FindClusters(seurat, resolution = 0.5)# 优化模块性函数以确定簇(寻找聚类)
+#可视化
+DimPlot(seurat, reduction = "pca",pt.size = 0.5)
+DimPlot(seurat, reduction = "tsne",pt.size = 0.3,label = T) + theme_classic()+theme(panel.border = element_rect(fill=NA,color="black", size=0.5, linetype="solid"),legend.position = "right")
+DimPlot(seurat,reduction = 'umap',pt.size = 0.4,label = T) + theme_classic()+theme(panel.border = element_rect(fill=NA,color="black", size=0.5, linetype="solid"),legend.position = "right")
+
+
+#载入参考数据集
+refdata=celldex::HumanPrimaryCellAtlasData()
+
+testdata <- GetAssayData(seurat, layer="data")
+cellpred <- SingleR(test = testdata,  
+                    ref = refdata, 
+                    labels = refdata$label.main)
+celltype = data.frame(ClusterID = rownames(cellpred), 
+                      celltype = cellpred$labels, 
+                      stringsAsFactors = F)
+#可视化
+newLabels=cellpred$labels
+names(newLabels)=levels(seurat)
+seurat=RenameIdents(seurat, newLabels)
+DimPlot(seurat, reduction = "tsne", label = T, label.size = 3.5,pt.size = 0.5)+theme_classic()+theme(panel.border = element_rect(fill=NA,color="black", size=0.5, linetype="solid"),legend.position = "right")
+DimPlot(seurat, reduction = "umap", label = T, label.size = 3.5,pt.size = 0.5)+theme_classic()+theme(panel.border = element_rect(fill=NA,color="black", size=0.5, linetype="solid"),legend.position = "right")
+
+#基因差异表达分析
+#寻找所有聚类中差异表达的基因
+all_markers <- FindAllMarkers(seurat, only.pos = TRUE, 
+            min.pct = 0.25, logfc.threshold = 0.25)
+#选择每个聚类中前十个表达最高的基因并将基因名称写出来
+top10 <- all_markers %>% group_by(cluster) %>% 
+                  top_n(n = 10, wt = avg_log2FC)
+print(top10$gene)
+#再根据自己所需选择
+selected_genes <- c("SCG5")
+#进行各种类型可视化
+FeaturePlot(seurat, features = selected_genes,pt.size = 0.25)# 每个基因的细胞聚类图
+FeaturePlot(seurat, features = selected_genes, reduction ="umap",  cols = c("grey", "red"),min.cutoff = 0, max.cutoff = 1,ncol=2,pt.size = 0.1)#修改参数
+RidgePlot(seurat, features = selected_genes)# 创建堆叠的密度图
+VlnPlot(seurat, features = selected_genes)# 小提琴图
